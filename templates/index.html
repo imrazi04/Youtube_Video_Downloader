@@ -1,0 +1,750 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>YouTube Downloader</title>
+  <style>
+    :root {
+      --primary: #ff0000;
+      --primary-dark: #cc0000;
+      --bg: #0f0f1a;
+      --card-bg: #1a1a2e;
+      --card-border: #2d2d4a;
+      --text: #e0e0f0;
+      --text-muted: #888;
+      --success: #00c851;
+      --error: #ff4444;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: linear-gradient(135deg, #0f0f1a 0%, #1a0a2e 50%, #0f1a2e 100%);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      color: var(--text);
+      padding: 1rem;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 620px;
+    }
+
+    /* ── Logo ─────────────────────────────── */
+    .logo {
+      text-align: center;
+      margin-bottom: 2rem;
+    }
+
+    .logo h1 {
+      font-size: 2rem;
+      background: linear-gradient(135deg, #ff0000, #ff6b6b);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      letter-spacing: -0.5px;
+    }
+
+    .logo p {
+      color: var(--text-muted);
+      font-size: 0.88rem;
+      margin-top: 0.3rem;
+    }
+
+    /* ── Card ─────────────────────────────── */
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 1.25rem;
+      padding: 2rem;
+      box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
+      animation: fadeUp 0.3s ease both;
+    }
+
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(12px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    /* ── Inputs ───────────────────────────── */
+    .input-row {
+      display: flex;
+      gap: 0.6rem;
+    }
+
+    .url-input {
+      flex: 1;
+      padding: 0.85rem 1rem;
+      border-radius: 0.75rem;
+      border: 1.5px solid var(--card-border);
+      background: rgba(255, 255, 255, 0.05);
+      color: var(--text);
+      font-size: 0.95rem;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    .url-input:focus { border-color: var(--primary); }
+    .url-input::placeholder { color: var(--text-muted); }
+
+    /* ── Buttons ──────────────────────────── */
+    .btn {
+      padding: 0.85rem 1.4rem;
+      border: none;
+      border-radius: 0.75rem;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.15s, box-shadow 0.15s, background 0.15s;
+      white-space: nowrap;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none !important; box-shadow: none !important; }
+
+    .btn-primary {
+      background: linear-gradient(135deg, #ff2020, #cc0000);
+      color: #fff;
+    }
+    .btn-primary:not(:disabled):hover {
+      transform: translateY(-1px);
+      box-shadow: 0 6px 20px rgba(255, 0, 0, 0.38);
+    }
+
+    .btn-secondary {
+      background: rgba(255, 255, 255, 0.1);
+      color: var(--text);
+    }
+    .btn-secondary:not(:disabled):hover { background: rgba(255, 255, 255, 0.16); }
+
+    .btn-success {
+      background: linear-gradient(135deg, #00c851, #007a33);
+      color: #fff;
+    }
+    .btn-success:not(:disabled):hover {
+      transform: translateY(-1px);
+      box-shadow: 0 6px 20px rgba(0, 200, 81, 0.35);
+    }
+
+    .btn-danger {
+      background: linear-gradient(135deg, #ff4444, #cc0000);
+      color: #fff;
+    }
+    .btn-danger:not(:disabled):hover {
+      transform: translateY(-1px);
+      box-shadow: 0 6px 20px rgba(255, 0, 0, 0.35);
+    }
+
+    /* ── Spinner ──────────────────────────── */
+    .spinner {
+      display: inline-block;
+      width: 15px;
+      height: 15px;
+      border: 2px solid rgba(255, 255, 255, 0.3);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.65s linear infinite;
+      flex-shrink: 0;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Inline error (fetch state) ───────── */
+    .inline-error {
+      margin-top: 0.9rem;
+      padding: 0.7rem 0.9rem;
+      border-radius: 0.6rem;
+      background: rgba(255, 68, 68, 0.1);
+      border: 1px solid rgba(255, 68, 68, 0.25);
+      color: #ff8888;
+      font-size: 0.85rem;
+      word-break: break-word;
+    }
+
+    /* ── Video info card ──────────────────── */
+    .video-row {
+      display: flex;
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+      align-items: flex-start;
+    }
+
+    .thumb-wrap {
+      flex-shrink: 0;
+      width: 130px;
+    }
+
+    .thumb-wrap img {
+      width: 100%;
+      border-radius: 0.5rem;
+      display: block;
+    }
+
+    .video-meta h3 {
+      font-size: 1rem;
+      line-height: 1.45;
+      margin-bottom: 0.4rem;
+      display: -webkit-box;
+      -webkit-line-clamp: 3;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
+    .video-meta .dur {
+      font-size: 0.82rem;
+      color: var(--text-muted);
+    }
+
+    .form-group { margin-bottom: 1rem; }
+
+    .form-group label {
+      display: block;
+      font-size: 0.82rem;
+      color: var(--text-muted);
+      margin-bottom: 0.35rem;
+    }
+
+    .select {
+      width: 100%;
+      padding: 0.75rem 1rem;
+      border-radius: 0.65rem;
+      border: 1.5px solid var(--card-border);
+      background: rgba(255, 255, 255, 0.05);
+      color: var(--text);
+      font-size: 0.93rem;
+      outline: none;
+      cursor: pointer;
+    }
+
+    .action-row {
+      display: flex;
+      gap: 0.6rem;
+      margin-top: 1.4rem;
+    }
+
+    /* ── Progress state ───────────────────── */
+    .prog-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-bottom: 0.8rem;
+    }
+
+    .prog-label { font-size: 0.9rem; color: var(--text-muted); }
+
+    .prog-pct {
+      font-size: 1.3rem;
+      font-weight: 700;
+      color: var(--primary);
+    }
+
+    .prog-track {
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 100px;
+      height: 12px;
+      overflow: hidden;
+      margin-bottom: 0.6rem;
+    }
+
+    .prog-fill {
+      height: 100%;
+      border-radius: 100px;
+      background: linear-gradient(90deg, #ff2020, #ff6b6b);
+      width: 0%;
+      transition: width 0.5s ease;
+      box-shadow: 0 0 10px rgba(255, 0, 0, 0.45);
+    }
+
+    .prog-speed {
+      text-align: right;
+      font-size: 0.83rem;
+      color: var(--text-muted);
+    }
+
+    .prog-hint {
+      text-align: center;
+      margin-top: 1.1rem;
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      animation: blink 1.8s ease-in-out infinite;
+    }
+
+    @keyframes blink {
+      0%, 100% { opacity: 0.9; }
+      50%       { opacity: 0.4; }
+    }
+
+    /* ── Success state ────────────────────── */
+    .big-icon {
+      width: 82px;
+      height: 82px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 2.4rem;
+      margin: 0 auto 1.4rem;
+    }
+
+    .big-icon.success {
+      background: linear-gradient(135deg, #00c851, #007a33);
+      box-shadow: 0 0 32px rgba(0, 200, 81, 0.45);
+      animation: popIn 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275) both;
+    }
+
+    @keyframes popIn {
+      from { transform: scale(0); opacity: 0; }
+      to   { transform: scale(1); opacity: 1; }
+    }
+
+    .big-icon.error {
+      background: linear-gradient(135deg, #ff4444, #cc0000);
+      box-shadow: 0 0 32px rgba(255, 0, 0, 0.4);
+      animation: shake 0.5s ease both;
+    }
+
+    @keyframes shake {
+      0%, 100% { transform: translateX(0); }
+      20%      { transform: translateX(-6px); }
+      40%      { transform: translateX(6px); }
+      60%      { transform: translateX(-4px); }
+      80%      { transform: translateX(4px); }
+    }
+
+    .state-title {
+      text-align: center;
+      font-size: 1.4rem;
+      font-weight: 700;
+      margin-bottom: 0.45rem;
+    }
+
+    .state-title.success {
+      background: linear-gradient(135deg, #00c851, #00ff6a);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .state-title.error { color: var(--error); }
+
+    .state-sub {
+      text-align: center;
+      font-size: 0.87rem;
+      color: var(--text-muted);
+    }
+
+    /* countdown strip */
+    .countdown-wrap { margin-top: 1.6rem; }
+
+    .countdown-track {
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 100px;
+      height: 4px;
+      overflow: hidden;
+    }
+
+    .countdown-fill {
+      height: 100%;
+      border-radius: 100px;
+      background: var(--success);
+      width: 100%;
+      transition: width 1s linear;
+    }
+
+    .countdown-label {
+      text-align: center;
+      margin-top: 0.5rem;
+      font-size: 0.8rem;
+      color: var(--text-muted);
+    }
+
+    /* ── Error detail box ─────────────────── */
+    .err-box {
+      margin: 1rem 0 1.4rem;
+      padding: 0.75rem 1rem;
+      border-radius: 0.6rem;
+      background: rgba(255, 68, 68, 0.09);
+      border: 1px solid rgba(255, 68, 68, 0.22);
+      color: #ff9999;
+      font-size: 0.84rem;
+      text-align: center;
+      word-break: break-word;
+      line-height: 1.5;
+    }
+
+    .err-actions {
+      display: flex;
+      gap: 0.6rem;
+      justify-content: center;
+    }
+
+    /* ── Utility ──────────────────────────── */
+    .hidden { display: none !important; }
+
+    footer {
+      text-align: center;
+      margin-top: 1.4rem;
+      font-size: 0.78rem;
+      color: rgba(255, 255, 255, 0.18);
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+
+    <!-- Logo -->
+    <div class="logo">
+      <h1>&#9654; YouTube Downloader</h1>
+      <p>Download videos in your preferred quality — fast &amp; free</p>
+    </div>
+
+    <!-- ════════════════════════════════════════
+         STATE 1 · INITIAL  (URL input)
+    ════════════════════════════════════════ -->
+    <div id="state-initial" class="card">
+      <div class="input-row">
+        <input
+          id="url-input"
+          class="url-input"
+          type="text"
+          placeholder="Paste YouTube URL here..."
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <button id="fetch-btn" class="btn btn-primary" onclick="fetchInfo()">
+          Fetch
+        </button>
+      </div>
+      <div id="fetch-error" class="inline-error hidden"></div>
+    </div>
+
+    <!-- ════════════════════════════════════════
+         STATE 2 · INFO  (video details + resolution)
+    ════════════════════════════════════════ -->
+    <div id="state-info" class="card hidden">
+      <div class="video-row">
+        <div class="thumb-wrap">
+          <img id="thumbnail" src="" alt="Thumbnail" />
+        </div>
+        <div class="video-meta">
+          <h3 id="video-title"></h3>
+          <p class="dur" id="video-dur"></p>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label for="resolution-select">Select Resolution</label>
+        <select id="resolution-select" class="select"></select>
+      </div>
+
+      <div class="action-row">
+        <button class="btn btn-secondary" onclick="goBack()">&larr; Back</button>
+        <button id="download-btn" class="btn btn-primary" style="flex:1" onclick="startDownload()">
+          Download
+        </button>
+      </div>
+    </div>
+
+    <!-- ════════════════════════════════════════
+         STATE 3 · DOWNLOADING  (progress bar)
+    ════════════════════════════════════════ -->
+    <div id="state-downloading" class="card hidden">
+      <div class="prog-header">
+        <span class="prog-label">Downloading&hellip;</span>
+        <span class="prog-pct" id="dl-pct">0%</span>
+      </div>
+      <div class="prog-track">
+        <div class="prog-fill" id="dl-bar"></div>
+      </div>
+      <div class="prog-speed" id="dl-speed">Connecting&hellip;</div>
+      <div class="prog-hint" id="dl-hint">Please wait, this may take a moment</div>
+    </div>
+
+    <!-- ════════════════════════════════════════
+         STATE 4 · SUCCESS
+    ════════════════════════════════════════ -->
+    <div id="state-success" class="card hidden">
+      <div class="big-icon success">&#10003;</div>
+      <div class="state-title success">Video Downloaded Successfully!</div>
+      <p class="state-sub">Saved to your Downloads folder.</p>
+      <div class="countdown-wrap">
+        <div class="countdown-track">
+          <div class="countdown-fill" id="cd-bar"></div>
+        </div>
+        <div class="countdown-label">
+          Resetting in <strong id="cd-num">5</strong>s&hellip;
+        </div>
+      </div>
+    </div>
+
+    <!-- ════════════════════════════════════════
+         STATE 5 · ERROR
+    ════════════════════════════════════════ -->
+    <div id="state-error" class="card hidden">
+      <div class="big-icon error">&#10005;</div>
+      <div class="state-title error">Download Failed</div>
+      <div class="err-box" id="err-detail">An unexpected error occurred.</div>
+      <div class="err-actions">
+        <button class="btn btn-secondary" onclick="resetToInitial()">Start Over</button>
+        <button class="btn btn-danger" onclick="retryDownload()">&#8635; Retry</button>
+      </div>
+    </div>
+
+    <footer>Powered by yt-dlp &amp; Flask &mdash; for personal use only</footer>
+  </div>
+
+  <!-- ════════════════════════════════════════════════════════════
+       JAVASCRIPT
+  ════════════════════════════════════════════════════════════ -->
+  <script>
+    const API = window.location.origin; // Same-origin when served by Flask
+
+    let pollTimer   = null;
+    let lastUrl     = '';
+    let lastRes     = '';
+    let cdTimer     = null;
+
+    // ── Helpers ───────────────────────────────────────────────────
+    const $ = id => document.getElementById(id);
+
+    const STATES = ['initial', 'info', 'downloading', 'success', 'error'];
+
+    function showState(name) {
+      STATES.forEach(s =>
+        $(`state-${s}`).classList.toggle('hidden', s !== name)
+      );
+    }
+
+    function fmtDuration(sec) {
+      if (!sec) return '';
+      const h = Math.floor(sec / 3600);
+      const m = Math.floor((sec % 3600) / 60);
+      const s = sec % 60;
+      const pad = n => String(n).padStart(2, '0');
+      return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+    }
+
+    function fmtPct(raw) {
+      if (!raw) return 0;
+      const n = parseFloat(String(raw).replace('%', '').trim());
+      return isNaN(n) ? 0 : Math.min(n, 100);
+    }
+
+    // ── STATE 1 — Fetch Info ──────────────────────────────────────
+    async function fetchInfo() {
+      const url = $('url-input').value.trim();
+      if (!url) { showFetchErr('Please paste a YouTube URL first.'); return; }
+
+      const btn = $('fetch-btn');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span> Fetching&hellip;';
+      hideFetchErr();
+
+      try {
+        const res = await fetch(`${API}/get-info`, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ url }),
+        });
+        const data = await res.json();
+        if (!res.ok) { showFetchErr(data.error || 'Failed to fetch video info.'); return; }
+
+        lastUrl = url;
+        populateInfoState(data);
+        showState('info');
+      } catch {
+        showFetchErr('Network error — is the Flask server running?');
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = 'Fetch';
+      }
+    }
+
+    function showFetchErr(msg) {
+      const el = $('fetch-error');
+      el.textContent = msg;
+      el.classList.remove('hidden');
+    }
+
+    function hideFetchErr() { $('fetch-error').classList.add('hidden'); }
+
+    function populateInfoState(data) {
+      $('thumbnail').src       = data.thumbnail || '';
+      $('video-title').textContent = data.title || 'Unknown Title';
+      const dur = fmtDuration(data.duration);
+      $('video-dur').textContent = dur ? `Duration: ${dur}` : '';
+
+      const sel = $('resolution-select');
+      sel.innerHTML = '';
+
+      const combined = data.available_resolutions  || [];
+      const videoOnly = data.video_only_resolutions || [];
+      const all = [...new Set([...combined, ...videoOnly])];
+
+      if (all.length === 0) {
+        sel.innerHTML = '<option value="720p">720p (default)</option>';
+      } else {
+        all.forEach(r => {
+          const opt = document.createElement('option');
+          opt.value = r;
+          const needsMerge = videoOnly.includes(r) && !combined.includes(r);
+          opt.textContent = needsMerge ? `${r} (requires FFmpeg merge)` : r;
+          sel.appendChild(opt);
+        });
+      }
+    }
+
+    // ── STATE 2 — Back ────────────────────────────────────────────
+    function goBack() { showState('initial'); }
+
+    // ── STATE 3 — Start Download ──────────────────────────────────
+    async function startDownload() {
+      const resolution = $('resolution-select').value;
+      lastRes = resolution;
+
+      const btn = $('download-btn');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span> Starting&hellip;';
+
+      try {
+        const res = await fetch(`${API}/download`, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ url: lastUrl, resolution }),
+        });
+        const data = await res.json();
+        if (!res.ok) { showErrorState(data.error || 'Failed to start download.'); return; }
+
+        resetProgressUI();
+        showState('downloading');
+        startPolling();
+      } catch {
+        showErrorState('Network error — could not reach the server.');
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = 'Download';
+      }
+    }
+
+    // ── Retry ─────────────────────────────────────────────────────
+    async function retryDownload() {
+      if (!lastUrl || !lastRes) { resetToInitial(); return; }
+
+      resetProgressUI();
+      showState('downloading');
+
+      try {
+        const res = await fetch(`${API}/download`, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ url: lastUrl, resolution: lastRes }),
+        });
+        const data = await res.json();
+        if (!res.ok) { showErrorState(data.error || 'Failed to start download.'); return; }
+        startPolling();
+      } catch {
+        showErrorState('Network error — could not reach the server.');
+      }
+    }
+
+    function resetProgressUI() {
+      $('dl-pct').textContent     = '0%';
+      $('dl-bar').style.width     = '0%';
+      $('dl-speed').textContent   = 'Connecting…';
+      $('dl-hint').textContent    = 'Please wait, this may take a moment';
+    }
+
+    // ── Polling ───────────────────────────────────────────────────
+    function startPolling() {
+      stopPolling();
+      pollTimer = setInterval(pollProgress, 1000);
+    }
+
+    function stopPolling() {
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    }
+
+    async function pollProgress() {
+      try {
+        const res  = await fetch(`${API}/progress`);
+        const data = await res.json();
+        applyProgressData(data);
+
+        if (data.status === 'finished') {
+          stopPolling();
+          showSuccessState();
+        } else if (data.status === 'error') {
+          stopPolling();
+          showErrorState(data.error || 'Download failed for an unknown reason.');
+        }
+      } catch {
+        stopPolling();
+        showErrorState('Connection lost while downloading. Please retry.');
+      }
+    }
+
+    function applyProgressData(data) {
+      const pct = fmtPct(data.percent);
+      $('dl-pct').textContent   = `${pct.toFixed(1)}%`;
+      $('dl-bar').style.width   = `${pct}%`;
+      $('dl-speed').textContent = data.speed ? `Speed: ${data.speed}` : '';
+
+      if (data.status === 'starting') {
+        $('dl-hint').textContent = 'Preparing download…';
+      } else if (data.status === 'downloading') {
+        $('dl-hint').textContent = 'Downloading — please keep this page open';
+      }
+    }
+
+    // ── STATE 4 — Success ─────────────────────────────────────────
+    function showSuccessState() {
+      showState('success');
+
+      if (cdTimer) { clearInterval(cdTimer); cdTimer = null; }
+
+      let count = 5;
+      $('cd-num').textContent  = count;
+      $('cd-bar').style.width  = '100%';
+
+      cdTimer = setInterval(() => {
+        count--;
+        $('cd-num').textContent = count;
+        $('cd-bar').style.width = `${(count / 5) * 100}%`;
+        if (count <= 0) {
+          clearInterval(cdTimer);
+          cdTimer = null;
+          resetToInitial();
+        }
+      }, 1000);
+    }
+
+    // ── STATE 5 — Error ───────────────────────────────────────────
+    function showErrorState(msg) {
+      $('err-detail').textContent = msg;
+      showState('error');
+    }
+
+    // ── Full Reset ────────────────────────────────────────────────
+    function resetToInitial() {
+      stopPolling();
+      if (cdTimer) { clearInterval(cdTimer); cdTimer = null; }
+      $('url-input').value = '';
+      hideFetchErr();
+      showState('initial');
+    }
+
+    // ── Enter key on URL input ────────────────────────────────────
+    $('url-input').addEventListener('keydown', e => {
+      if (e.key === 'Enter') fetchInfo();
+    });
+  </script>
+</body>
+</html>
