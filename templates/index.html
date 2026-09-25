@@ -105,6 +105,7 @@
       white-space: nowrap;
       display: inline-flex;
       align-items: center;
+      justify-content: center;
       gap: 0.4rem;
     }
 
@@ -207,21 +208,73 @@
 
     .form-group label {
       display: block;
-      font-size: 0.82rem;
-      color: var(--text-muted);
-      margin-bottom: 0.35rem;
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 0.6rem;
     }
 
-    .select {
-      width: 100%;
-      padding: 0.75rem 1rem;
-      border-radius: 0.65rem;
+    .res-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+      gap: 0.6rem;
+    }
+
+    .res-option { position: relative; cursor: pointer; }
+
+    .res-option input {
+      position: absolute;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .res-card {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.3rem;
+      padding: 0.85rem 0.5rem;
+      border-radius: 0.75rem;
       border: 1.5px solid var(--card-border);
-      background: rgba(255, 255, 255, 0.05);
+      background: rgba(255, 255, 255, 0.04);
+      transition: border-color 0.15s, background 0.15s, box-shadow 0.15s, transform 0.15s;
+    }
+
+    .res-option:hover .res-card {
+      border-color: rgba(255, 255, 255, 0.25);
+      background: rgba(255, 255, 255, 0.07);
+      transform: translateY(-1px);
+    }
+
+    .res-name {
+      font-size: 1.15rem;
+      font-weight: 700;
       color: var(--text);
-      font-size: 0.93rem;
-      outline: none;
-      cursor: pointer;
+    }
+
+    .res-tag {
+      font-size: 0.68rem;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding: 0.15rem 0.5rem;
+      border-radius: 100px;
+      color: var(--text-muted);
+      background: rgba(255, 255, 255, 0.07);
+    }
+
+    .res-option input:checked + .res-card {
+      border-color: var(--primary);
+      background: rgba(255, 0, 0, 0.12);
+      box-shadow: 0 0 0 3px rgba(255, 0, 0, 0.18), 0 6px 18px rgba(255, 0, 0, 0.2);
+    }
+    .res-option input:checked + .res-card .res-tag {
+      color: #fff;
+      background: var(--primary);
+    }
+    .res-option input:focus-visible + .res-card {
+      outline: 2px solid #fff;
+      outline-offset: 2px;
     }
 
     .action-row {
@@ -441,8 +494,8 @@
       </div>
 
       <div class="form-group">
-        <label for="resolution-select">Select Resolution</label>
-        <select id="resolution-select" class="select"></select>
+        <label id="res-label">Select Quality</label>
+        <div id="res-grid" class="res-grid" role="radiogroup" aria-labelledby="res-label"></div>
       </div>
 
       <div class="action-row">
@@ -458,7 +511,7 @@
     ════════════════════════════════════════ -->
     <div id="state-downloading" class="card hidden">
       <div class="prog-header">
-        <span class="prog-label">Downloading&hellip;</span>
+        <span class="prog-label" id="dl-label">Downloading&hellip;</span>
         <span class="prog-pct" id="dl-pct">0%</span>
       </div>
       <div class="prog-track">
@@ -575,30 +628,37 @@
       const dur = fmtDuration(data.duration);
       $('video-dur').textContent = dur ? `Duration: ${dur}` : '';
 
-      const sel = $('resolution-select');
-      sel.innerHTML = '';
+      const resolutions = data.available_resolutions?.length ? data.available_resolutions : ['720p'];
+      // Default to 720p when offered (good size/quality balance), else the best available
+      const preferred = resolutions.includes('720p') ? '720p' : resolutions[resolutions.length - 1];
 
-      const all = data.available_resolutions || [];
-
-      if (all.length === 0) {
-        sel.innerHTML = '<option value="720p">720p (default)</option>';
-      } else {
-        all.forEach(r => {
-          const opt = document.createElement('option');
-          opt.value = r;
-          opt.textContent = r;
-          sel.appendChild(opt);
-        });
-      }
+      const grid = $('res-grid');
+      grid.innerHTML = '';
+      resolutions.forEach(r => {
+        const option = document.createElement('label');
+        option.className = 'res-option';
+        option.innerHTML = `
+          <input type="radio" name="resolution" value="${r}" ${r === preferred ? 'checked' : ''}>
+          <span class="res-card">
+            <span class="res-name">${r}</span>
+            <span class="res-tag">${QUALITY_TAGS[r] || ''}</span>
+          </span>`;
+        grid.appendChild(option);
+      });
     }
+
+    const QUALITY_TAGS = { '360p': 'SD', '480p': 'SD', '720p': 'HD', '1080p': 'Full HD' };
 
     // ── STATE 2 — Back ────────────────────────────────────────────
     function goBack() { showState('initial'); }
 
     // ── STATE 3 — Download ────────────────────────────────────────
-    // The server fetches the video from YouTube first, then streams the
-    // finished file back; we show real progress for that transfer.
-    function startDownload() { runDownload($('resolution-select').value); }
+    // /download streams newline-delimited JSON progress events while the
+    // server fetches the video from YouTube, then a {"type":"file"} line
+    // followed by the raw bytes of the finished MP4.
+    function startDownload() {
+      runDownload(document.querySelector('input[name="resolution"]:checked').value);
+    }
 
     function retryDownload() {
       if (!lastUrl || !lastRes) { resetToInitial(); return; }
@@ -622,35 +682,60 @@
           return;
         }
 
-        const total  = Number(res.headers.get('Content-Length')) || 0;
-        const reader = res.body.getReader();
-        const chunks = [];
-        let received = 0;
-        const t0 = performance.now();
-        $('dl-hint').textContent = 'Downloading — please keep this page open';
+        const reader  = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf  = new Uint8Array(0);
+        let file = null;                 // { name, size, chunks, received, t0 }
+
+        const handleBytes = bytes => {
+          file.chunks.push(bytes);
+          file.received += bytes.length;
+          const secs = (performance.now() - file.t0) / 1000;
+          applyProgress(file.received / file.size * 100, secs ? file.received / secs : 0);
+        };
 
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-          chunks.push(value);
-          received += value.length;
-          const secs = (performance.now() - t0) / 1000;
-          applyProgress(total ? received / total * 100 : 0, secs ? received / secs : 0);
+          if (file) { handleBytes(value); continue; }
+
+          buf = concat(buf, value);
+          let nl;
+          while (!file && (nl = buf.indexOf(10)) !== -1) {
+            const event = JSON.parse(decoder.decode(buf.subarray(0, nl)));
+            buf = buf.subarray(nl + 1);
+
+            if (event.type === 'error') { showErrorState(event.error); return; }
+            if (event.type === 'status') {
+              $('dl-label').textContent = event.message;
+            } else if (event.type === 'progress') {
+              applyProgress(event.percent, event.speed, event.eta);
+            } else if (event.type === 'file') {
+              file = { name: event.name, size: event.size, chunks: [], received: 0, t0: performance.now() };
+              $('dl-label').textContent = 'Saving to your device…';
+              $('dl-hint').textContent  = 'Almost done';
+              applyProgress(0, 0);
+              if (buf.length) handleBytes(buf);
+            }
+          }
         }
 
-        saveBlob(new Blob(chunks, { type: 'video/mp4' }), filenameFrom(res));
+        if (!file || file.received < file.size) {
+          showErrorState('Connection lost while downloading. Please retry.');
+          return;
+        }
+        saveBlob(new Blob(file.chunks, { type: 'video/mp4' }), file.name);
         showSuccessState();
       } catch {
         showErrorState('Connection lost while downloading. Please retry.');
       }
     }
 
-    function filenameFrom(res) {
-      const cd = res.headers.get('Content-Disposition') || '';
-      const utf8 = cd.match(/filename\*=UTF-8''([^;]+)/i);
-      if (utf8) return decodeURIComponent(utf8[1]);
-      const plain = cd.match(/filename="([^"]+)"/i);
-      return plain ? plain[1] : 'video.mp4';
+    function concat(a, b) {
+      const out = new Uint8Array(a.length + b.length);
+      out.set(a);
+      out.set(b, a.length);
+      return out;
     }
 
     function saveBlob(blob, name) {
@@ -671,17 +756,21 @@
     }
 
     function resetProgressUI() {
+      $('dl-label').textContent   = 'Connecting to YouTube…';
       $('dl-pct').textContent     = '0%';
       $('dl-bar').style.width     = '0%';
-      $('dl-speed').textContent   = 'Fetching video from YouTube…';
-      $('dl-hint').textContent    = 'Preparing download — this can take a minute';
+      $('dl-speed').textContent   = '';
+      $('dl-hint').textContent    = 'Please keep this page open';
     }
 
-    function applyProgress(pct, bps) {
+    function applyProgress(pct, bps, eta) {
       pct = Math.min(pct, 100);
       $('dl-pct').textContent   = `${pct.toFixed(1)}%`;
       $('dl-bar').style.width   = `${pct}%`;
-      $('dl-speed').textContent = bps ? `Speed: ${fmtSpeed(bps)}` : '';
+      const parts = [];
+      if (bps) parts.push(`Speed: ${fmtSpeed(bps)}`);
+      if (eta) parts.push(`ETA: ${fmtDuration(Math.round(eta))}`);
+      $('dl-speed').textContent = parts.join(' · ');
     }
 
     // ── STATE 4 — Success ─────────────────────────────────────────

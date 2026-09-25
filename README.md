@@ -97,7 +97,18 @@ Youtube_Video_Downloader/
 { "url": "https://www.youtube.com/watch?v=...", "resolution": "720p" }
 ```
 
-Errors are returned as `{ "error": "..." }` with HTTP 400.
+Invalid requests return `{ "error": "..." }` with HTTP 400.
+
+`/download` streams newline-delimited JSON progress events, then the file, all in one response:
+
+```
+{"type": "status",   "message": "Downloading from YouTube…"}
+{"type": "progress", "percent": 42.5, "speed": 5242880, "eta": 12}
+{"type": "file",     "name": "Video title.mp4", "size": 123456789}
+<exactly `size` raw bytes of the MP4>
+```
+
+If something fails, the stream ends with `{"type": "error", "error": "..."}` instead of a `file` line.
 
 ---
 

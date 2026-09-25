@@ -1,10 +1,13 @@
 from flask import Flask, Response, jsonify, request, render_template
 from flask_cors import CORS
-from urllib.parse import quote
+import json
 import os
+import queue
 import re
 import shutil
 import tempfile
+import threading
+import time
 import yt_dlp
 
 
@@ -28,6 +31,11 @@ os.environ.setdefault("DENO_DIR", os.path.join(_TMP, "deno"))
 
 _RESOLUTIONS = {"360p": 360, "480p": 480, "720p": 720, "1080p": 1080}
 _CHUNK_SIZE  = 1024 * 1024
+
+# YouTube randomly serves "limited" sessions (SABR experiment) that expose only
+# 360p, or stream URLs that 403 mid-download. A fresh extraction usually gets a
+# normal session, so we retry the whole extract + download a few times.
+_ATTEMPTS = 3
 
 
 def _find_deno():
@@ -100,16 +108,137 @@ def _clean_error(exc):
     return msg
 
 
-def _content_disposition(filename):
-    """Attachment header that survives non-ASCII video titles."""
-    ascii_name = filename.encode("ascii", "ignore").decode() or "video.mp4"
-    ascii_name = ascii_name.replace('"', "")
-    return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename)}"
+def _resolutions_in(info):
+    """Set of supported resolution labels that have a video stream."""
+    label_map = {height: label for label, height in _RESOLUTIONS.items()}
+    found = set()
+
+    for fmt in info.get("formats") or []:
+        # 1. Prefer the raw integer height field — most reliable
+        height = fmt.get("height")
+
+        # 2. Fall back to parsing "WIDTHxHEIGHT" resolution string
+        if not isinstance(height, int) or height <= 0:
+            m = re.search(r"x(\d+)$", str(fmt.get("resolution") or ""))
+            if m:
+                height = int(m.group(1))
+
+        # 3. Fall back to parsing format_note like "720p" or "1080p60"
+        if not isinstance(height, int) or height <= 0:
+            m = re.search(r"(\d+)p", str(fmt.get("format_note") or ""))
+            if m:
+                height = int(m.group(1))
+
+        if height in label_map and fmt.get("vcodec") not in (None, "", "none"):
+            found.add(label_map[height])
+    return found
+
+
+def _is_limited_session(info):
+    """Limited (SABR) sessions expose a single muxed 360p format and nothing else."""
+    video_formats = [f for f in info.get("formats") or [] if f.get("vcodec") not in (None, "", "none")]
+    return len(video_formats) <= 1
+
+
+def _is_session_error(exc):
+    """Errors that a fresh YouTube session (new extraction) can fix."""
+    msg = str(exc)
+    return "403" in msg or "Forbidden" in msg or "Requested format is not available" in msg
+
+
+def _json_line(obj):
+    return (json.dumps(obj) + "\n").encode()
+
+
+def _download_job(url, target_height, events, cancelled):
+    """
+    Runs in a worker thread: downloads the video with yt-dlp into a temp dir,
+    pushing progress events onto `events`. Ends with a "file" or "error" event.
+    """
+    work_dir = tempfile.mkdtemp(prefix="ytdl-", dir=_TMP)
+    progress = {"done": 0, "total": 0, "last": 0.0}
+
+    def on_progress(d):
+        if cancelled.is_set():
+            raise yt_dlp.utils.DownloadCancelled("Browser disconnected")
+        if d["status"] == "finished":
+            # Video and audio are separate files; count finished ones toward the total
+            progress["done"] += d.get("total_bytes") or d.get("downloaded_bytes") or 0
+            return
+        now = time.monotonic()
+        if d["status"] != "downloading" or now - progress["last"] < 0.3:
+            return
+        progress["last"] = now
+        got   = progress["done"] + (d.get("downloaded_bytes") or 0)
+        total = progress["total"] or d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+        events.put({
+            "type":    "progress",
+            "percent": round(min(got / total * 100, 99.9), 1) if total else 0,
+            "speed":   d.get("speed") or 0,
+            "eta":     d.get("eta"),
+        })
+
+    def on_postprocess(d):
+        if d["status"] == "started" and d["postprocessor"] == "Merger":
+            events.put({"type": "status", "message": "Merging video and audio…"})
+
+    ydl_opts = {
+        **_base_opts(),
+        "noplaylist":          True,
+        "noprogress":          True,
+        "outtmpl":             os.path.join(work_dir, "%(title).150B.%(ext)s"),
+        "merge_output_format": "mp4",
+        "format": (
+            # Prefer H.264 + AAC so the MP4 plays in every player
+            f"bestvideo[height<={target_height}][vcodec^=avc1]+bestaudio[ext=m4a]"
+            f"/bestvideo[height<={target_height}][ext=mp4]+bestaudio[ext=m4a]"
+            f"/bestvideo[height<={target_height}]+bestaudio"
+            f"/best[height<={target_height}]/best"
+        ),
+        "retries":             10,
+        "fragment_retries":    10,
+        "progress_hooks":      [on_progress],
+        "postprocessor_hooks": [on_postprocess],
+    }
+
+    for attempt in range(_ATTEMPTS):
+        last_try = attempt == _ATTEMPTS - 1
+        if attempt:
+            events.put({"type": "status", "message": f"YouTube limited this session — retrying ({attempt + 1}/{_ATTEMPTS})…"})
+        else:
+            events.put({"type": "status", "message": "Connecting to YouTube…"})
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                # A limited session makes the format fallback pick a lower
+                # quality than requested; get a fresh session instead.
+                if _is_limited_session(info) and (info.get("height") or 0) < target_height and not last_try:
+                    continue
+                progress.update(done=0, total=sum(
+                    f.get("filesize") or f.get("filesize_approx") or 0
+                    for f in info.get("requested_formats") or [info]
+                ))
+                events.put({"type": "status", "message": "Downloading from YouTube…"})
+                ydl.process_ie_result(info, download=True)
+            files = [f for f in os.listdir(work_dir) if not f.endswith((".part", ".ytdl"))]
+            if not files:
+                raise RuntimeError("Download finished but no file was produced.")
+            path = os.path.join(work_dir, files[0])
+            events.put({"type": "file", "name": files[0], "size": os.path.getsize(path),
+                        "path": path, "dir": work_dir})
+            return
+        except Exception as exc:
+            for leftover in os.listdir(work_dir):
+                os.remove(os.path.join(work_dir, leftover))
+            if cancelled.is_set() or last_try or not _is_session_error(exc):
+                shutil.rmtree(work_dir, ignore_errors=True)
+                events.put({"type": "error", "error": _clean_error(exc)})
+                return
 
 
 def create_app():
     app = Flask(__name__)
-    CORS(app, expose_headers=["Content-Disposition", "Content-Length"])
+    CORS(app)
 
     app.config["YTDLP_VERSION"] = yt_dlp.version.__version__
 
@@ -141,34 +270,23 @@ def create_app():
 
         ydl_opts = {**_base_opts(), "skip_download": True, "noplaylist": True, "retries": 5}
 
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-        except Exception as exc:
-            return jsonify({"error": _clean_error(exc)}), 400
+        best_info, best_found = None, set()
+        for attempt in range(_ATTEMPTS):
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+            except Exception as exc:
+                if best_info is None and (attempt == _ATTEMPTS - 1 or not _is_session_error(exc)):
+                    return jsonify({"error": _clean_error(exc)}), 400
+                continue
 
-        label_map = {height: label for label, height in _RESOLUTIONS.items()}
-        found = set()
+            found = _resolutions_in(info)
+            if best_info is None or len(found) > len(best_found):
+                best_info, best_found = info, found
+            if not _is_limited_session(info):
+                break
 
-        for fmt in info.get("formats") or []:
-            # 1. Prefer the raw integer height field — most reliable
-            height = fmt.get("height")
-
-            # 2. Fall back to parsing "WIDTHxHEIGHT" resolution string
-            if not isinstance(height, int) or height <= 0:
-                m = re.search(r"x(\d+)$", str(fmt.get("resolution") or ""))
-                if m:
-                    height = int(m.group(1))
-
-            # 3. Fall back to parsing format_note like "720p" or "1080p60"
-            if not isinstance(height, int) or height <= 0:
-                m = re.search(r"(\d+)p", str(fmt.get("format_note") or ""))
-                if m:
-                    height = int(m.group(1))
-
-            if height in label_map and fmt.get("vcodec") not in (None, "", "none"):
-                found.add(label_map[height])
-
+        info, found = best_info, best_found
         return jsonify({
             "title":                 info.get("title"),
             "thumbnail":             info.get("thumbnail"),
@@ -191,52 +309,40 @@ def create_app():
         if resolution not in _RESOLUTIONS:
             return jsonify({"error": f"Invalid resolution. Choose from: {list(_RESOLUTIONS)}"}), 400
 
-        target_height = _RESOLUTIONS[resolution]
-        work_dir = tempfile.mkdtemp(prefix="ytdl-", dir=_TMP)
+        events    = queue.Queue()
+        cancelled = threading.Event()
+        threading.Thread(
+            target=_download_job,
+            args=(url, _RESOLUTIONS[resolution], events, cancelled),
+            daemon=True,
+        ).start()
 
-        ydl_opts = {
-            **_base_opts(),
-            "noplaylist":          True,
-            "outtmpl":             os.path.join(work_dir, "%(title).150B.%(ext)s"),
-            "merge_output_format": "mp4",
-            "format": (
-                # Prefer H.264 + AAC so the MP4 plays in every player
-                f"bestvideo[height<={target_height}][vcodec^=avc1]+bestaudio[ext=m4a]"
-                f"/bestvideo[height<={target_height}][ext=mp4]+bestaudio[ext=m4a]"
-                f"/bestvideo[height<={target_height}]+bestaudio"
-                f"/best[height<={target_height}]/best"
-            ),
-            "retries":             10,
-            "fragment_retries":    10,
-        }
-
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
-            files = [f for f in os.listdir(work_dir) if not f.endswith((".part", ".ytdl"))]
-            if not files:
-                raise RuntimeError("Download finished but no file was produced.")
-        except Exception as exc:
-            shutil.rmtree(work_dir, ignore_errors=True)
-            return jsonify({"error": _clean_error(exc)}), 400
-
-        filename = files[0]
-        path     = os.path.join(work_dir, filename)
-        size     = os.path.getsize(path)
-
-        # Stream in chunks (Vercel only allows >4.5 MB responses when streamed),
-        # then delete the temp copy once the browser has it.
+        # One streamed response: JSON progress lines while the server downloads
+        # from YouTube, then a {"type": "file"} header line followed by the raw
+        # file bytes. Streaming keeps it to a single request, which works on
+        # Vercel (no shared state between instances, no 4.5 MB body limit).
         def stream():
             try:
-                with open(path, "rb") as f:
-                    while chunk := f.read(_CHUNK_SIZE):
-                        yield chunk
+                while True:
+                    event = events.get()
+                    if event["type"] == "file":
+                        yield _json_line({"type": "file", "name": event["name"], "size": event["size"]})
+                        try:
+                            with open(event["path"], "rb") as f:
+                                while chunk := f.read(_CHUNK_SIZE):
+                                    yield chunk
+                        finally:
+                            shutil.rmtree(event["dir"], ignore_errors=True)
+                        return
+                    yield _json_line(event)
+                    if event["type"] == "error":
+                        return
             finally:
-                shutil.rmtree(work_dir, ignore_errors=True)
+                cancelled.set()  # browser closed the page → stop the download
 
-        return Response(stream(), mimetype="application/octet-stream", headers={
-            "Content-Disposition": _content_disposition(filename),
-            "Content-Length":      str(size),
+        return Response(stream(), mimetype="application/x-ndjson", headers={
+            "Cache-Control":     "no-cache",
+            "X-Accel-Buffering": "no",
         })
 
     return app
