@@ -1,6 +1,6 @@
 # YouTube Video Downloader
 
-A modern, browser-based YouTube video downloader built with Flask and yt-dlp. Paste a URL, pick a resolution, and the video downloads through your browser. It runs locally or on Vercel.
+A modern, browser-based YouTube video downloader built with Flask and yt-dlp. Paste a URL, pick a resolution, and the video downloads through your browser. It runs on your own PC and can be shared online through a free Cloudflare Tunnel link.
 
 ---
 
@@ -35,37 +35,31 @@ Open http://localhost:5000.
 
 ---
 
-## Deploy to Vercel
+## Share It Online (hosted from your PC)
 
-1. Push this repo to GitHub.
-2. On [vercel.com/new](https://vercel.com/new), import the repo. Vercel detects Flask from the top-level `app` in `app.py`, so leave **Framework Preset**, build command and output directory at their defaults.
-3. Click **Deploy**.
-4. Open `https://<your-project>.vercel.app/health`. It should report `"deno": true, "ffmpeg": true`.
+YouTube blocks cloud/data-center IPs (Vercel, VPS, Render, …) with *"Sign in to confirm you're not a bot"*, and cookie workarounds expire quickly. A home internet connection isn't blocked. So the app runs on your PC, and a free **Cloudflare Tunnel** gives it a public HTTPS link. There's no router or port-forwarding setup, no cookies and no environment variables.
 
-Or use the CLI: `npm i -g vercel`, then run `vercel` (preview) or `vercel --prod` from the project folder.
+**One-time setup**
 
-### Limits on Vercel
+```powershell
+winget install --id Cloudflare.cloudflared
+pip install -r requirements.txt
+```
 
-- **Duration:** each download must finish within the function time limit: 300 s on Hobby, up to 800 s on Pro. Long videos at 1080p may time out. Use a lower resolution, or run the app locally.
-- **YouTube bot check:** YouTube often blocks data-center IPs, including Vercel's, with *"Sign in to confirm you're not a bot"*. If you see this, add one of these **Environment Variables** in Vercel (Project → Settings → Environment Variables), then redeploy:
+**Start it**
 
-| Variable | Value |
-|---|---|
-| `YTDLP_COOKIES` | Full contents of a Netscape-format `cookies.txt` exported from a browser logged in to YouTube. Use a throwaway Google account. |
-| `YTDLP_PROXY` | A proxy URL, e.g. `http://user:pass@host:port` (a residential proxy works best). |
+Double-click **`start.bat`**. It starts the production server (`serve.py`, using waitress) and the tunnel, then prints a public link like `https://random-words.trycloudflare.com` and copies it to your clipboard. Share that link.
 
-#### Exporting YouTube cookies
+- Keep the window open, and keep the PC awake. Closing the window stops both.
+- The link changes each time you restart. For a permanent link on your own domain, create a *named tunnel* with a free Cloudflare account (see [Cloudflare's tunnel guide](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/get-started/)).
+- Downloads run through your internet connection, so share the link only with people you trust.
 
-1. Install the **"Get cookies.txt LOCALLY"** browser extension (Chrome/Edge/Firefox).
-2. Open a **private/incognito window** (allow the extension there), go to youtube.com and sign in, ideally with a throwaway Google account.
-3. In the same tab, open `https://www.youtube.com/robots.txt`, click the extension, and export cookies **for the current site only** in Netscape format.
-4. **Close the private window right away** without signing out. This keeps YouTube from rotating (invalidating) the exported cookies.
-5. In Vercel → Project → Settings → Environment Variables, add `YTDLP_COOKIES` and paste the whole file contents as the value. Save, then **redeploy**. Environment variable changes only apply to new deployments.
-6. Check `https://<your-app>.vercel.app/health`: it should show `"cookies": true`.
+**Run locally only (no public link)**
 
-Cookies expire eventually, typically after weeks. When the bot error comes back, repeat these steps.
-
-For heavy use, a regular server works better than serverless because it has no time limit and a stable IP. Good options are a VPS, Render, Railway or Fly.io; there, run `gunicorn app:app`.
+```powershell
+python serve.py      # production server on http://localhost:5000
+python app.py        # or: Flask dev server with auto-reload, for development
+```
 
 ---
 
@@ -82,9 +76,10 @@ For heavy use, a regular server works better than serverless because it has no t
 
 ```
 Youtube_Video_Downloader/
-├── app.py              # Flask backend (API + serves frontend); `app` is the Vercel entry point
+├── app.py              # Flask backend (API + serves frontend)
+├── serve.py            # Production server (waitress)
+├── start.ps1 / start.bat  # Starts server + public Cloudflare Tunnel link
 ├── requirements.txt    # Python dependencies
-├── .vercelignore       # Files excluded from the Vercel upload
 └── templates/
     └── index.html      # Single-page frontend
 ```
@@ -96,7 +91,7 @@ Youtube_Video_Downloader/
 | Method | Endpoint    | Description                                          |
 |--------|-------------|------------------------------------------------------|
 | GET    | `/`         | Serves the web UI                                    |
-| GET    | `/health`   | Health check, yt-dlp version, deno/ffmpeg found      |
+| GET    | `/health`   | Status, extractor and version, and `ready` once deno + ffmpeg are found |
 | POST   | `/get-info` | Fetch video metadata and resolutions                 |
 | POST   | `/download` | Download the video and stream the MP4 in the response |
 
@@ -128,8 +123,9 @@ If something fails, the stream ends with `{"type": "error", "error": "..."}` ins
 | Problem | Fix |
 |---|---|
 | `This video is not available` for a working video | yt-dlp is outdated or has no JS runtime. Run `pip install -U -r requirements.txt`. |
-| `Sign in to confirm you're not a bot` | YouTube is blocking the server's IP. Set `YTDLP_COOKIES` or `YTDLP_PROXY` (see above). |
-| `FUNCTION_INVOCATION_TIMEOUT` on Vercel | The video is too long for the time limit. Pick a lower resolution. |
+| `Sign in to confirm you're not a bot` | The app is running on a cloud/data-center IP. Run it from your home PC (see above). |
+| `The page needs to be reloaded` | YouTube changed something. Run `pip install -U -r requirements.txt` and restart. |
+| `start.bat` shows no public link | Check your internet connection, then run it again. The app still works at http://localhost:5000. |
 | `ModuleNotFoundError: No module named 'flask'` | The virtual environment is not active. Run `venv\Scripts\activate` first. |
 | Port 5000 already in use | Change the port in `app.py`: `app.run(port=5001)` |
 
@@ -145,6 +141,7 @@ YouTube changes often. If downloads start failing, first update yt-dlp: bump its
 | flask-cors | Cross-Origin Resource Sharing headers |
 | yt-dlp[default,deno] | YouTube downloading engine, JS challenge solver and Deno runtime |
 | imageio-ffmpeg | Bundled FFmpeg binary for merging video and audio |
+| waitress | Production WSGI server that works on Windows |
 
 ---
 

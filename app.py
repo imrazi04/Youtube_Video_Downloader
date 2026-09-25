@@ -56,25 +56,6 @@ def _find_ffmpeg():
         return shutil.which("ffmpeg")
 
 
-def _cookie_file():
-    """
-    Optional: YouTube often blocks datacenter IPs (e.g. Vercel) with
-    "Sign in to confirm you're not a bot". Put the contents of a Netscape
-    cookies.txt in the YTDLP_COOKIES env var to authenticate.
-    """
-    cookies = os.environ.get("YTDLP_COOKIES", "").strip().strip('"')
-    if not cookies:
-        return None
-    if "\n" not in cookies:
-        cookies = cookies.replace("\\n", "\n")  # value pasted with literal \n escapes
-    if not cookies.startswith(("# Netscape", "# HTTP")):
-        cookies = "# Netscape HTTP Cookie File\n" + cookies
-    path = os.path.join(_TMP, "yt-cookies.txt")
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(cookies + "\n")
-    return path
-
-
 def _base_opts():
     """yt-dlp options shared by info extraction and downloads."""
     opts = {
@@ -91,11 +72,6 @@ def _base_opts():
     ffmpeg_bin = _find_ffmpeg()
     if ffmpeg_bin:
         opts["ffmpeg_location"] = ffmpeg_bin
-    cookie_file = _cookie_file()
-    if cookie_file:
-        opts["cookiefile"] = cookie_file
-    if os.environ.get("YTDLP_PROXY"):
-        opts["proxy"] = os.environ["YTDLP_PROXY"]
     return opts
 
 
@@ -103,12 +79,12 @@ def _clean_error(exc):
     """Turn a yt-dlp exception into a short, readable message."""
     msg = _ANSI_RE.sub("", str(exc)).replace("ERROR: ", "").strip()
     if "not a bot" in msg or "Sign in to confirm" in msg:
-        if os.environ.get("YTDLP_COOKIES"):
-            msg = ("YouTube rejected this server's cookies (they have probably expired). "
-                   "Export fresh cookies into YTDLP_COOKIES and redeploy.")
-        else:
-            msg = ("YouTube is blocking this server with a bot check. "
-                   "Add YouTube cookies in the YTDLP_COOKIES environment variable and redeploy (see README).")
+        # Happens on cloud/datacenter IPs (Vercel, VPS…). Host on a home connection instead.
+        msg = ("YouTube is blocking this server's IP with a bot check. "
+               "Run the app from a home internet connection (see README).")
+    elif "page needs to be reloaded" in msg:
+        msg = ("YouTube changed something on its side. Update the downloader with "
+               "'pip install -U -r requirements.txt', restart, and try again.")
     elif "10054" in msg or "forcibly closed" in msg.lower():
         msg = "Connection reset by YouTube. Please wait a moment and try again."
     return msg
@@ -257,12 +233,10 @@ def create_app():
     @app.route("/health", methods=["GET"])
     def health():
         return jsonify({
-            "status":         "ok",
-            "yt_dlp_version": app.config["YTDLP_VERSION"],
-            "deno":           bool(_find_deno()),
-            "ffmpeg":         bool(_find_ffmpeg()),
-            "cookies":        bool(os.environ.get("YTDLP_COOKIES")),
-            "proxy":          bool(os.environ.get("YTDLP_PROXY")),
+            "status":    "ok",
+            "extractor": "yt-dlp",
+            "version":   app.config["YTDLP_VERSION"],
+            "ready":     bool(_find_deno()) and bool(_find_ffmpeg()),
         })
 
     # ── Fetch video metadata ──────────────────────────────────────
