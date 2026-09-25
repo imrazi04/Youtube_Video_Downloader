@@ -507,7 +507,6 @@
   <script>
     const API = window.location.origin; // Same-origin when served by Flask
 
-    let pollTimer   = null;
     let lastUrl     = '';
     let lastRes     = '';
     let cdTimer     = null;
@@ -530,12 +529,6 @@
       const s = sec % 60;
       const pad = n => String(n).padStart(2, '0');
       return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
-    }
-
-    function fmtPct(raw) {
-      if (!raw) return 0;
-      const n = parseFloat(String(raw).replace('%', '').trim());
-      return isNaN(n) ? 0 : Math.min(n, 100);
     }
 
     // ── STATE 1 — Fetch Info ──────────────────────────────────────
@@ -585,9 +578,7 @@
       const sel = $('resolution-select');
       sel.innerHTML = '';
 
-      const combined = data.available_resolutions  || [];
-      const videoOnly = data.video_only_resolutions || [];
-      const all = [...new Set([...combined, ...videoOnly])];
+      const all = data.available_resolutions || [];
 
       if (all.length === 0) {
         sel.innerHTML = '<option value="720p">720p (default)</option>';
@@ -595,8 +586,7 @@
         all.forEach(r => {
           const opt = document.createElement('option');
           opt.value = r;
-          const needsMerge = videoOnly.includes(r) && !combined.includes(r);
-          opt.textContent = needsMerge ? `${r} (requires FFmpeg merge)` : r;
+          opt.textContent = r;
           sel.appendChild(opt);
         });
       }
@@ -605,39 +595,18 @@
     // ── STATE 2 — Back ────────────────────────────────────────────
     function goBack() { showState('initial'); }
 
-    // ── STATE 3 — Start Download ──────────────────────────────────
-    async function startDownload() {
-      const resolution = $('resolution-select').value;
-      lastRes = resolution;
+    // ── STATE 3 — Download ────────────────────────────────────────
+    // The server fetches the video from YouTube first, then streams the
+    // finished file back; we show real progress for that transfer.
+    function startDownload() { runDownload($('resolution-select').value); }
 
-      const btn = $('download-btn');
-      btn.disabled = true;
-      btn.innerHTML = '<span class="spinner"></span> Starting&hellip;';
-
-      try {
-        const res = await fetch(`${API}/download`, {
-          method:  'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body:    JSON.stringify({ url: lastUrl, resolution }),
-        });
-        const data = await res.json();
-        if (!res.ok) { showErrorState(data.error || 'Failed to start download.'); return; }
-
-        resetProgressUI();
-        showState('downloading');
-        startPolling();
-      } catch {
-        showErrorState('Network error — could not reach the server.');
-      } finally {
-        btn.disabled = false;
-        btn.innerHTML = 'Download';
-      }
+    function retryDownload() {
+      if (!lastUrl || !lastRes) { resetToInitial(); return; }
+      runDownload(lastRes);
     }
 
-    // ── Retry ─────────────────────────────────────────────────────
-    async function retryDownload() {
-      if (!lastUrl || !lastRes) { resetToInitial(); return; }
-
+    async function runDownload(resolution) {
+      lastRes = resolution;
       resetProgressUI();
       showState('downloading');
 
@@ -645,63 +614,74 @@
         const res = await fetch(`${API}/download`, {
           method:  'POST',
           headers: { 'Content-Type': 'application/json' },
-          body:    JSON.stringify({ url: lastUrl, resolution: lastRes }),
+          body:    JSON.stringify({ url: lastUrl, resolution }),
         });
-        const data = await res.json();
-        if (!res.ok) { showErrorState(data.error || 'Failed to start download.'); return; }
-        startPolling();
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          showErrorState(data.error || `Download failed (HTTP ${res.status}).`);
+          return;
+        }
+
+        const total  = Number(res.headers.get('Content-Length')) || 0;
+        const reader = res.body.getReader();
+        const chunks = [];
+        let received = 0;
+        const t0 = performance.now();
+        $('dl-hint').textContent = 'Downloading — please keep this page open';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+          received += value.length;
+          const secs = (performance.now() - t0) / 1000;
+          applyProgress(total ? received / total * 100 : 0, secs ? received / secs : 0);
+        }
+
+        saveBlob(new Blob(chunks, { type: 'video/mp4' }), filenameFrom(res));
+        showSuccessState();
       } catch {
-        showErrorState('Network error — could not reach the server.');
+        showErrorState('Connection lost while downloading. Please retry.');
       }
+    }
+
+    function filenameFrom(res) {
+      const cd = res.headers.get('Content-Disposition') || '';
+      const utf8 = cd.match(/filename\*=UTF-8''([^;]+)/i);
+      if (utf8) return decodeURIComponent(utf8[1]);
+      const plain = cd.match(/filename="([^"]+)"/i);
+      return plain ? plain[1] : 'video.mp4';
+    }
+
+    function saveBlob(blob, name) {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    }
+
+    function fmtSpeed(bps) {
+      const units = ['B/s', 'KiB/s', 'MiB/s', 'GiB/s'];
+      let i = 0;
+      while (bps >= 1024 && i < units.length - 1) { bps /= 1024; i++; }
+      return `${bps.toFixed(2)} ${units[i]}`;
     }
 
     function resetProgressUI() {
       $('dl-pct').textContent     = '0%';
       $('dl-bar').style.width     = '0%';
-      $('dl-speed').textContent   = 'Connecting…';
-      $('dl-hint').textContent    = 'Please wait, this may take a moment';
+      $('dl-speed').textContent   = 'Fetching video from YouTube…';
+      $('dl-hint').textContent    = 'Preparing download — this can take a minute';
     }
 
-    // ── Polling ───────────────────────────────────────────────────
-    function startPolling() {
-      stopPolling();
-      pollTimer = setInterval(pollProgress, 1000);
-    }
-
-    function stopPolling() {
-      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-    }
-
-    async function pollProgress() {
-      try {
-        const res  = await fetch(`${API}/progress`);
-        const data = await res.json();
-        applyProgressData(data);
-
-        if (data.status === 'finished') {
-          stopPolling();
-          showSuccessState();
-        } else if (data.status === 'error') {
-          stopPolling();
-          showErrorState(data.error || 'Download failed for an unknown reason.');
-        }
-      } catch {
-        stopPolling();
-        showErrorState('Connection lost while downloading. Please retry.');
-      }
-    }
-
-    function applyProgressData(data) {
-      const pct = fmtPct(data.percent);
+    function applyProgress(pct, bps) {
+      pct = Math.min(pct, 100);
       $('dl-pct').textContent   = `${pct.toFixed(1)}%`;
       $('dl-bar').style.width   = `${pct}%`;
-      $('dl-speed').textContent = data.speed ? `Speed: ${data.speed}` : '';
-
-      if (data.status === 'starting') {
-        $('dl-hint').textContent = 'Preparing download…';
-      } else if (data.status === 'downloading') {
-        $('dl-hint').textContent = 'Downloading — please keep this page open';
-      }
+      $('dl-speed').textContent = bps ? `Speed: ${fmtSpeed(bps)}` : '';
     }
 
     // ── STATE 4 — Success ─────────────────────────────────────────
@@ -734,7 +714,6 @@
 
     // ── Full Reset ────────────────────────────────────────────────
     function resetToInitial() {
-      stopPolling();
       if (cdTimer) { clearInterval(cdTimer); cdTimer = null; }
       $('url-input').value = '';
       hideFetchErr();

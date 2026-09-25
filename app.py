@@ -1,21 +1,11 @@
-from flask import Flask, jsonify, request, render_template
+from flask import Flask, Response, jsonify, request, render_template
 from flask_cors import CORS
-import glob
-import re
+from urllib.parse import quote
 import os
-import threading
+import re
+import shutil
+import tempfile
 import yt_dlp
-
-
-# Global progress store for the current download session
-_download_progress = {
-    "percent": "",
-    "speed": "",
-    "status": "idle",  # idle | starting | downloading | finished | error
-    "filename": "",
-    "error": None,
-}
-_download_lock = threading.Lock()
 
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
@@ -32,137 +22,96 @@ _BROWSER_HEADERS = {
     "Sec-Fetch-Mode": "navigate",
 }
 
+# Only /tmp is writable on Vercel; the system temp dir works locally too.
+_TMP = tempfile.gettempdir()
+os.environ.setdefault("DENO_DIR", os.path.join(_TMP, "deno"))
 
-def _clean(s):
-    """Strip ANSI escape codes and whitespace from a string."""
-    return _ANSI_RE.sub("", str(s)).strip() if s else ""
-
-
-def _fmt_speed(bps):
-    """Format bytes/sec to a human-readable string without ANSI codes."""
-    if not bps:
-        return ""
-    for unit in ("B/s", "KiB/s", "MiB/s", "GiB/s"):
-        if bps < 1024:
-            return f"{bps:.2f} {unit}"
-        bps /= 1024
-    return f"{bps:.2f} TiB/s"
+_RESOLUTIONS = {"360p": 360, "480p": 480, "720p": 720, "1080p": 1080}
+_CHUNK_SIZE  = 1024 * 1024
 
 
-def progress_hook(d):
-    """yt-dlp progress hook — updates global progress state."""
-    with _download_lock:
-        if d["status"] == "downloading":
-            # Compute percent from raw bytes to avoid ANSI-coded _percent_str
-            downloaded = d.get("downloaded_bytes") or 0
-            total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
-            pct = f"{downloaded / total * 100:.1f}%" if total > 0 else "0.0%"
-
-            # Format speed from raw bytes/s to avoid ANSI-coded _speed_str
-            speed = _fmt_speed(d.get("speed")) or _clean(d.get("_speed_str", ""))
-
-            _download_progress["status"]  = "downloading"
-            _download_progress["percent"] = pct
-            _download_progress["speed"]   = speed
-            _download_progress["error"]   = None
-        elif d["status"] == "finished":
-            _download_progress["status"]   = "finished"
-            _download_progress["percent"]  = "100%"
-            _download_progress["speed"]    = ""
-            _download_progress["filename"] = d.get("filename", "")
-            _download_progress["error"]    = None
-
-
-def get_downloads_folder():
-    """Return the system Downloads folder (Windows / macOS / Linux)."""
-    return os.path.join(os.path.expanduser("~"), "Downloads")
-
-
-def cleanup_partial_files(folder):
-    """Remove leftover yt-dlp partial download files (.part / .ytdl)."""
-    for pattern in ("*.part", "*.ytdl"):
-        for path in glob.glob(os.path.join(folder, pattern)):
-            try:
-                os.remove(path)
-            except OSError:
-                pass
-
-
-def download_worker(url, resolution):
-    """Background worker: runs yt-dlp and updates global progress."""
-    res_map = {"360p": 360, "480p": 480, "720p": 720, "1080p": 1080}
-    target_height = res_map.get(resolution, 720)
-
-    downloads_folder = get_downloads_folder()
-    output_template  = os.path.join(downloads_folder, "%(title)s.%(ext)s")
-
-    format_selector = (
-        f"bestvideo[height<={target_height}][vcodec!=none][acodec=none]"
-        f"+bestaudio[acodec!=none][vcodec=none]"
-        f"/best[height<={target_height}]"
-    )
-
-    ydl_opts = {
-        "quiet":               True,
-        "nocheckcertificate":  True,
-        "ignorewarnings":      True,
-        "outtmpl":             output_template,
-        "progress_hooks":      [progress_hook],
-        "merge_output_format": "mp4",
-        "format":              format_selector,
-        "http_headers":        _BROWSER_HEADERS,
-        "socket_timeout":      30,
-        "retries":             10,
-        "fragment_retries":    10,
-    }
-
-    with _download_lock:
-        _download_progress["status"] = "starting"
-
+def _find_deno():
+    """Deno (pip package) solves YouTube's JS challenges — without it YouTube says 'video not available'."""
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-        # Ensure finished state is set even if the hook didn't fire last
-        with _download_lock:
-            _download_progress["status"]  = "finished"
-            _download_progress["percent"] = "100%"
-            _download_progress["speed"]   = ""
-            _download_progress["error"]   = None
-    except yt_dlp.utils.DownloadError as exc:
-        msg = str(exc).strip()
-        if "10054" in msg or "forcibly closed" in msg.lower():
-            msg = (
-                "Connection reset by YouTube (WinError 10054). "
-                "YouTube throttled or blocked the request after retries. "
-                "Please wait a moment and try again."
-            )
-        with _download_lock:
-            _download_progress["status"] = "error"
-            _download_progress["error"]  = msg
-        cleanup_partial_files(downloads_folder)
-    except Exception as exc:
-        msg = str(exc)
-        if "10054" in msg or "forcibly closed" in msg.lower():
-            msg = (
-                "Connection lost mid-download (WinError 10054). "
-                "YouTube may be throttling your IP. Please retry in a moment."
-            )
-        else:
-            msg = f"Download failed: {exc}"
-        with _download_lock:
-            _download_progress["status"] = "error"
-            _download_progress["error"]  = msg
-        cleanup_partial_files(downloads_folder)
+        import deno
+        return deno.find_deno_bin()
+    except Exception:
+        return shutil.which("deno")
+
+
+def _find_ffmpeg():
+    """FFmpeg (imageio-ffmpeg package) merges separate video + audio streams."""
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return shutil.which("ffmpeg")
+
+
+def _cookie_file():
+    """
+    Optional: YouTube often blocks datacenter IPs (e.g. Vercel) with
+    "Sign in to confirm you're not a bot". Put the contents of a Netscape
+    cookies.txt in the YTDLP_COOKIES env var to authenticate.
+    """
+    cookies = os.environ.get("YTDLP_COOKIES")
+    if not cookies:
+        return None
+    path = os.path.join(_TMP, "yt-cookies.txt")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(cookies)
+    return path
+
+
+def _base_opts():
+    """yt-dlp options shared by info extraction and downloads."""
+    opts = {
+        "quiet":              True,
+        "no_warnings":        True,
+        "nocheckcertificate": True,
+        "http_headers":       _BROWSER_HEADERS,
+        "socket_timeout":     30,
+        "cachedir":           os.path.join(_TMP, "yt-dlp-cache"),
+    }
+    deno_bin = _find_deno()
+    if deno_bin:
+        opts["js_runtimes"] = {"deno": {"path": deno_bin}}
+    ffmpeg_bin = _find_ffmpeg()
+    if ffmpeg_bin:
+        opts["ffmpeg_location"] = ffmpeg_bin
+    cookie_file = _cookie_file()
+    if cookie_file:
+        opts["cookiefile"] = cookie_file
+    if os.environ.get("YTDLP_PROXY"):
+        opts["proxy"] = os.environ["YTDLP_PROXY"]
+    return opts
+
+
+def _clean_error(exc):
+    """Turn a yt-dlp exception into a short, readable message."""
+    msg = _ANSI_RE.sub("", str(exc)).replace("ERROR: ", "").strip()
+    if "not a bot" in msg or "Sign in to confirm" in msg:
+        msg += (
+            " — YouTube is blocking this server's IP. Set the YTDLP_COOKIES "
+            "(or YTDLP_PROXY) environment variable; see README."
+        )
+    elif "10054" in msg or "forcibly closed" in msg.lower():
+        msg = "Connection reset by YouTube. Please wait a moment and try again."
+    return msg
+
+
+def _content_disposition(filename):
+    """Attachment header that survives non-ASCII video titles."""
+    ascii_name = filename.encode("ascii", "ignore").decode() or "video.mp4"
+    ascii_name = ascii_name.replace('"', "")
+    return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename)}"
 
 
 def create_app():
     app = Flask(__name__)
-    CORS(app)
+    CORS(app, expose_headers=["Content-Disposition", "Content-Length"])
 
-    yt_dlp_version = getattr(yt_dlp, "__version__", None)
-    if yt_dlp_version is None and hasattr(yt_dlp, "version"):
-        yt_dlp_version = getattr(yt_dlp.version, "__version__", None)
-    app.config["YTDLP_VERSION"] = yt_dlp_version
+    app.config["YTDLP_VERSION"] = yt_dlp.version.__version__
 
     # ── Serve the frontend ────────────────────────────────────────
     @app.route("/", methods=["GET"])
@@ -175,6 +124,8 @@ def create_app():
         return jsonify({
             "status":         "ok",
             "yt_dlp_version": app.config["YTDLP_VERSION"],
+            "deno":           bool(_find_deno()),
+            "ffmpeg":         bool(_find_ffmpeg()),
         })
 
     # ── Fetch video metadata ──────────────────────────────────────
@@ -188,85 +139,46 @@ def create_app():
         if not url or not isinstance(url, str):
             return jsonify({"error": "A valid 'url' field is required."}), 400
 
-        ydl_opts = {
-            "quiet":              True,
-            "skip_download":      True,
-            "nocheckcertificate": True,
-            "ignorewarnings":     True,
-            "http_headers":       _BROWSER_HEADERS,
-            "socket_timeout":     30,
-            "retries":            5,
-        }
+        ydl_opts = {**_base_opts(), "skip_download": True, "noplaylist": True, "retries": 5}
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
-        except yt_dlp.utils.DownloadError as exc:
-            return jsonify({"error": str(exc).strip()}), 400
         except Exception as exc:
-            return jsonify({"error": f"Unable to extract video info: {exc}"}), 400
+            return jsonify({"error": _clean_error(exc)}), 400
 
-        title     = info.get("title")
-        thumbnail = info.get("thumbnail")
-        duration  = info.get("duration")
+        label_map = {height: label for label, height in _RESOLUTIONS.items()}
+        found = set()
 
-        formats = info.get("formats") or []
-        label_map = {360: "360p", 480: "480p", 720: "720p", 1080: "1080p"}
-        desired_order = ["360p", "480p", "720p", "1080p"]
-        video_audio_resolutions = []
-        video_only_resolutions  = []
-
-        for fmt in formats:
+        for fmt in info.get("formats") or []:
             # 1. Prefer the raw integer height field — most reliable
             height = fmt.get("height")
 
             # 2. Fall back to parsing "WIDTHxHEIGHT" resolution string
             if not isinstance(height, int) or height <= 0:
-                res_str = str(fmt.get("resolution") or "")
-                m = re.search(r"x(\d+)$", res_str)
+                m = re.search(r"x(\d+)$", str(fmt.get("resolution") or ""))
                 if m:
                     height = int(m.group(1))
 
             # 3. Fall back to parsing format_note like "720p" or "1080p60"
             if not isinstance(height, int) or height <= 0:
-                note = str(fmt.get("format_note") or "")
-                m = re.search(r"(\d+)p", note)
+                m = re.search(r"(\d+)p", str(fmt.get("format_note") or ""))
                 if m:
                     height = int(m.group(1))
 
-            resolution = label_map.get(height)
-            if not resolution:
-                continue
-
-            has_video = fmt.get("vcodec") not in (None, "", "none")
-            has_audio = fmt.get("acodec") not in (None, "", "none")
-
-            if has_video and has_audio:
-                if resolution not in video_audio_resolutions:
-                    video_audio_resolutions.append(resolution)
-            elif has_video and not has_audio:
-                if resolution not in video_only_resolutions:
-                    video_only_resolutions.append(resolution)
-
-        available_resolutions = [r for r in desired_order if r in video_audio_resolutions]
-        fallback_resolutions  = [
-            r for r in desired_order
-            if r in video_only_resolutions and r not in video_audio_resolutions
-        ]
+            if height in label_map and fmt.get("vcodec") not in (None, "", "none"):
+                found.add(label_map[height])
 
         return jsonify({
-            "title":                 title,
-            "thumbnail":             thumbnail,
-            "duration":              duration,
-            "available_resolutions": available_resolutions,
-            "video_only_resolutions": fallback_resolutions,
+            "title":                 info.get("title"),
+            "thumbnail":             info.get("thumbnail"),
+            "duration":              info.get("duration"),
+            "available_resolutions": [r for r in _RESOLUTIONS if r in found],
         })
 
-    # ── Start download ────────────────────────────────────────────
+    # ── Download & stream the file to the browser ─────────────────
     @app.route("/download", methods=["POST"])
-    def start_download():
-        global _download_progress
-
+    def download():
         payload = request.get_json(silent=True)
         if not payload or not isinstance(payload, dict):
             return jsonify({"error": "Invalid JSON body."}), 400
@@ -276,58 +188,63 @@ def create_app():
 
         if not url or not isinstance(url, str):
             return jsonify({"error": "A valid 'url' field is required."}), 400
-        if not resolution or not isinstance(resolution, str):
-            return jsonify({"error": "A valid 'resolution' field is required (360p, 480p, 720p, 1080p)."}), 400
+        if resolution not in _RESOLUTIONS:
+            return jsonify({"error": f"Invalid resolution. Choose from: {list(_RESOLUTIONS)}"}), 400
 
-        valid_resolutions = ["360p", "480p", "720p", "1080p"]
-        if resolution not in valid_resolutions:
-            return jsonify({"error": f"Invalid resolution. Choose from: {valid_resolutions}"}), 400
+        target_height = _RESOLUTIONS[resolution]
+        work_dir = tempfile.mkdtemp(prefix="ytdl-", dir=_TMP)
 
-        with _download_lock:
-            _download_progress = {
-                "percent":  "",
-                "speed":    "",
-                "status":   "starting",
-                "filename": "",
-                "error":    None,
-            }
+        ydl_opts = {
+            **_base_opts(),
+            "noplaylist":          True,
+            "outtmpl":             os.path.join(work_dir, "%(title).150B.%(ext)s"),
+            "merge_output_format": "mp4",
+            "format": (
+                # Prefer H.264 + AAC so the MP4 plays in every player
+                f"bestvideo[height<={target_height}][vcodec^=avc1]+bestaudio[ext=m4a]"
+                f"/bestvideo[height<={target_height}][ext=mp4]+bestaudio[ext=m4a]"
+                f"/bestvideo[height<={target_height}]+bestaudio"
+                f"/best[height<={target_height}]/best"
+            ),
+            "retries":             10,
+            "fragment_retries":    10,
+        }
 
-        thread = threading.Thread(
-            target=download_worker,
-            args=(url, resolution),
-            daemon=True,
-        )
-        thread.start()
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+            files = [f for f in os.listdir(work_dir) if not f.endswith((".part", ".ytdl"))]
+            if not files:
+                raise RuntimeError("Download finished but no file was produced.")
+        except Exception as exc:
+            shutil.rmtree(work_dir, ignore_errors=True)
+            return jsonify({"error": _clean_error(exc)}), 400
 
-        return jsonify({
-            "message":    "Download started",
-            "resolution": resolution,
-            "status":     "starting",
-        }), 202
+        filename = files[0]
+        path     = os.path.join(work_dir, filename)
+        size     = os.path.getsize(path)
 
-    # ── Poll progress ─────────────────────────────────────────────
-    @app.route("/progress", methods=["GET"])
-    def get_progress():
-        with _download_lock:
-            return jsonify(_download_progress.copy())
+        # Stream in chunks (Vercel only allows >4.5 MB responses when streamed),
+        # then delete the temp copy once the browser has it.
+        def stream():
+            try:
+                with open(path, "rb") as f:
+                    while chunk := f.read(_CHUNK_SIZE):
+                        yield chunk
+            finally:
+                shutil.rmtree(work_dir, ignore_errors=True)
 
-    # ── Manual reset (clears error/finished state) ────────────────
-    @app.route("/reset", methods=["POST"])
-    def reset_progress():
-        global _download_progress
-        with _download_lock:
-            _download_progress = {
-                "percent":  "",
-                "speed":    "",
-                "status":   "idle",
-                "filename": "",
-                "error":    None,
-            }
-        return jsonify({"status": "idle", "message": "Progress reset."})
+        return Response(stream(), mimetype="application/octet-stream", headers={
+            "Content-Disposition": _content_disposition(filename),
+            "Content-Length":      str(size),
+        })
 
     return app
 
 
+# Vercel looks for a top-level `app` in app.py
+app = create_app()
+
+
 if __name__ == "__main__":
-    app = create_app()
     app.run(host="0.0.0.0", port=5000, debug=True)

@@ -1,6 +1,6 @@
 # YouTube Video Downloader
 
-A modern, browser-based YouTube video downloader built with Flask and yt-dlp. Paste a URL, pick a resolution, and the video saves directly to your Downloads folder.
+A modern, browser-based YouTube video downloader built with Flask and yt-dlp. Paste a URL, pick a resolution, and the video downloads through your browser. It runs locally or on Vercel.
 
 ---
 
@@ -8,113 +8,62 @@ A modern, browser-based YouTube video downloader built with Flask and yt-dlp. Pa
 
 - Clean single-page UI with live progress bar
 - Supports 360p, 480p, 720p, and 1080p
-- Automatic video + audio merging via FFmpeg (for split-stream resolutions)
+- Automatic video + audio merging (FFmpeg is bundled via `imageio-ffmpeg`, no manual install)
+- YouTube JS-challenge solving (Deno is bundled via pip, no manual install)
 - Success notification with 5-second auto-reset
 - Error display with one-click Retry
-- Partial-file cleanup on failed downloads
 
 ---
 
-## Prerequisites
+## Run Locally
 
-### 1 — Python 3.9+
-
-Download from [python.org](https://www.python.org/downloads/). During installation on Windows, check **"Add Python to PATH"**.
-
-Verify:
+Requires Python 3.9+.
 
 ```bash
-python --version
-```
-
-### 2 — FFmpeg
-
-FFmpeg is required to merge video and audio streams for 720p / 1080p downloads.
-
-**Windows**
-
-1. Download the latest build from [ffmpeg.org/download.html](https://ffmpeg.org/download.html) (choose a Windows build, e.g. from gyan.dev or BtbN).
-2. Extract the zip and copy `ffmpeg.exe`, `ffprobe.exe`, and `ffplay.exe` from the `bin/` folder to a permanent location, e.g. `C:\ffmpeg\bin\`.
-3. Add that folder to your **PATH**:
-   - Search "Environment Variables" in the Start menu.
-   - Under *System Variables* → *Path* → **Edit** → **New** → paste `C:\ffmpeg\bin`.
-   - Click OK and restart any open terminals.
-
-**macOS (Homebrew)**
-
-```bash
-brew install ffmpeg
-```
-
-**Linux (apt)**
-
-```bash
-sudo apt update && sudo apt install ffmpeg
-```
-
-Verify FFmpeg is available:
-
-```bash
-ffmpeg -version
-```
-
----
-
-## Installation
-
-```bash
-# 1. Clone or download the project
 git clone https://github.com/imrazi04/Youtube_Video_Downloader.git
 cd Youtube_Video_Downloader
 
-# 2. Create and activate a virtual environment
 python -m venv venv
+venv\Scripts\activate          # Windows
+source venv/bin/activate       # macOS / Linux
 
-# Windows
-venv\Scripts\activate
-
-# macOS / Linux
-source venv/bin/activate
-
-# 3. Install Python dependencies
 pip install -r requirements.txt
-```
-
----
-
-## Running the App
-
-```bash
-# Make sure the virtual environment is active, then:
 python app.py
 ```
 
-You should see:
+Open http://localhost:5000.
 
-```
- * Running on http://0.0.0.0:5000
-```
+---
 
-Open your browser and go to:
+## Deploy to Vercel
 
-```
-http://localhost:5000
-```
+1. Push this repo to GitHub.
+2. On [vercel.com/new](https://vercel.com/new), import the repo. Vercel detects Flask from the top-level `app` in `app.py`, so leave **Framework Preset**, build command and output directory at their defaults.
+3. Click **Deploy**.
+4. Open `https://<your-project>.vercel.app/health`. It should report `"deno": true, "ffmpeg": true`.
+
+Or use the CLI: `npm i -g vercel`, then run `vercel` (preview) or `vercel --prod` from the project folder.
+
+### Limits on Vercel
+
+- **Duration:** each download must finish within the function time limit: 300 s on Hobby, up to 800 s on Pro. Long videos at 1080p may time out. Use a lower resolution, or run the app locally.
+- **YouTube bot check:** YouTube often blocks data-center IPs, including Vercel's, with *"Sign in to confirm you're not a bot"*. If you see this, add one of these **Environment Variables** in Vercel (Project → Settings → Environment Variables), then redeploy:
+
+| Variable | Value |
+|---|---|
+| `YTDLP_COOKIES` | Full contents of a Netscape-format `cookies.txt` exported from a browser logged in to YouTube. Use a throwaway Google account. |
+| `YTDLP_PROXY` | A proxy URL, e.g. `http://user:pass@host:port` (a residential proxy works best). |
+
+For heavy use, a regular server works better than serverless because it has no time limit and a stable IP. Good options are a VPS, Render, Railway or Fly.io; there, run `gunicorn app:app`.
 
 ---
 
 ## How to Use
 
 1. **Paste** a YouTube video URL into the input field and click **Fetch**.
-2. The app retrieves the video title, thumbnail, and available resolutions.
-3. **Select** your preferred resolution from the dropdown.
-4. Click **Download** — a progress bar shows real-time download speed and percentage.
-5. When complete, a success message appears and the UI resets automatically after 5 seconds.
-6. If an error occurs, an error message is shown with a **Retry** button or a **Start Over** option.
-
-Downloaded files are saved to your system **Downloads** folder (`~/Downloads`).
-
-> **Note:** Resolutions marked *(requires FFmpeg merge)* are split video+audio streams. FFmpeg must be installed and on PATH for these to work correctly.
+2. **Select** your preferred resolution.
+3. Click **Download**. The server first fetches the video from YouTube, then streams it to your browser with a live progress bar.
+4. The file is saved by your browser (usually to your **Downloads** folder).
 
 ---
 
@@ -122,53 +71,33 @@ Downloaded files are saved to your system **Downloads** folder (`~/Downloads`).
 
 ```
 Youtube_Video_Downloader/
-├── app.py                  # Flask backend (API + serves frontend)
-├── requirements.txt        # Python dependencies
-├── templates/
-│   └── index.html          # Single-page frontend (all states)
-├── monitor.py              # CLI progress monitor (dev/debug use)
-├── venv/                   # Python virtual environment (git-ignored)
-└── README.md
+├── app.py              # Flask backend (API + serves frontend); `app` is the Vercel entry point
+├── requirements.txt    # Python dependencies
+├── .vercelignore       # Files excluded from the Vercel upload
+└── templates/
+    └── index.html      # Single-page frontend
 ```
 
 ---
 
 ## API Endpoints
 
-| Method | Endpoint    | Description                              |
-|--------|-------------|------------------------------------------|
-| GET    | `/`         | Serves the web UI                        |
-| GET    | `/health`   | Health check + yt-dlp version            |
-| POST   | `/get-info` | Fetch video metadata and resolutions     |
-| POST   | `/download` | Start a background download              |
-| GET    | `/progress` | Poll current download state              |
-| POST   | `/reset`    | Manually reset progress to idle          |
-
-### `/get-info` request body
+| Method | Endpoint    | Description                                          |
+|--------|-------------|------------------------------------------------------|
+| GET    | `/`         | Serves the web UI                                    |
+| GET    | `/health`   | Health check, yt-dlp version, deno/ffmpeg found      |
+| POST   | `/get-info` | Fetch video metadata and resolutions                 |
+| POST   | `/download` | Download the video and stream the MP4 in the response |
 
 ```json
+// /get-info
 { "url": "https://www.youtube.com/watch?v=..." }
-```
 
-### `/download` request body
-
-```json
+// /download
 { "url": "https://www.youtube.com/watch?v=...", "resolution": "720p" }
 ```
 
-### `/progress` response
-
-```json
-{
-  "status":   "downloading",
-  "percent":  " 64.3%",
-  "speed":    "3.20MiB/s",
-  "filename": "",
-  "error":    null
-}
-```
-
-`status` values: `idle` · `starting` · `downloading` · `finished` · `error`
+Errors are returned as `{ "error": "..." }` with HTTP 400.
 
 ---
 
@@ -176,11 +105,13 @@ Youtube_Video_Downloader/
 
 | Problem | Fix |
 |---|---|
-| `ModuleNotFoundError: No module named 'flask'` | Virtual environment not active — run `venv\Scripts\activate` first |
-| Progress stays at 0% / video not saved | FFmpeg not on PATH — follow the FFmpeg installation steps above |
-| `ERROR: Sign in to confirm your age` | yt-dlp limitation for age-restricted videos |
+| `This video is not available` for a working video | yt-dlp is outdated or has no JS runtime. Run `pip install -U -r requirements.txt`. |
+| `Sign in to confirm you're not a bot` | YouTube is blocking the server's IP. Set `YTDLP_COOKIES` or `YTDLP_PROXY` (see above). |
+| `FUNCTION_INVOCATION_TIMEOUT` on Vercel | The video is too long for the time limit. Pick a lower resolution. |
+| `ModuleNotFoundError: No module named 'flask'` | The virtual environment is not active. Run `venv\Scripts\activate` first. |
 | Port 5000 already in use | Change the port in `app.py`: `app.run(port=5001)` |
-| `.part` file left in Downloads | This is auto-cleaned on failed downloads; manually delete if needed |
+
+YouTube changes often. If downloads start failing, first update yt-dlp: bump its version in `requirements.txt`, then redeploy.
 
 ---
 
@@ -188,9 +119,10 @@ Youtube_Video_Downloader/
 
 | Package | Purpose |
 |---|---|
-| Flask | Web framework / serves UI and API |
+| Flask | Web framework; serves the UI and API |
 | flask-cors | Cross-Origin Resource Sharing headers |
-| yt-dlp | YouTube downloading engine |
+| yt-dlp[default,deno] | YouTube downloading engine, JS challenge solver and Deno runtime |
+| imageio-ffmpeg | Bundled FFmpeg binary for merging video and audio |
 
 ---
 
