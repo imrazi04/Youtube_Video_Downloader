@@ -54,6 +54,17 @@ Or use the CLI: `npm i -g vercel`, then run `vercel` (preview) or `vercel --prod
 | `YTDLP_COOKIES` | Full contents of a Netscape-format `cookies.txt` exported from a browser logged in to YouTube. Use a throwaway Google account. |
 | `YTDLP_PROXY` | A proxy URL, e.g. `http://user:pass@host:port` (a residential proxy works best). |
 
+#### Exporting YouTube cookies
+
+1. Install the **"Get cookies.txt LOCALLY"** browser extension (Chrome/Edge/Firefox).
+2. Open a **private/incognito window** (allow the extension there), go to youtube.com and sign in, ideally with a throwaway Google account.
+3. In the same tab, open `https://www.youtube.com/robots.txt`, click the extension, and export cookies **for the current site only** in Netscape format.
+4. **Close the private window right away** without signing out. This keeps YouTube from rotating (invalidating) the exported cookies.
+5. In Vercel → Project → Settings → Environment Variables, add `YTDLP_COOKIES` and paste the whole file contents as the value. Save, then **redeploy**. Environment variable changes only apply to new deployments.
+6. Check `https://<your-app>.vercel.app/health`: it should show `"cookies": true`.
+
+Cookies expire eventually, typically after weeks. When the bot error comes back, repeat these steps.
+
 For heavy use, a regular server works better than serverless because it has no time limit and a stable IP. Good options are a VPS, Render, Railway or Fly.io; there, run `gunicorn app:app`.
 
 ---

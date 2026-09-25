@@ -62,12 +62,16 @@ def _cookie_file():
     "Sign in to confirm you're not a bot". Put the contents of a Netscape
     cookies.txt in the YTDLP_COOKIES env var to authenticate.
     """
-    cookies = os.environ.get("YTDLP_COOKIES")
+    cookies = os.environ.get("YTDLP_COOKIES", "").strip().strip('"')
     if not cookies:
         return None
+    if "\n" not in cookies:
+        cookies = cookies.replace("\\n", "\n")  # value pasted with literal \n escapes
+    if not cookies.startswith(("# Netscape", "# HTTP")):
+        cookies = "# Netscape HTTP Cookie File\n" + cookies
     path = os.path.join(_TMP, "yt-cookies.txt")
     with open(path, "w", encoding="utf-8") as f:
-        f.write(cookies)
+        f.write(cookies + "\n")
     return path
 
 
@@ -99,10 +103,12 @@ def _clean_error(exc):
     """Turn a yt-dlp exception into a short, readable message."""
     msg = _ANSI_RE.sub("", str(exc)).replace("ERROR: ", "").strip()
     if "not a bot" in msg or "Sign in to confirm" in msg:
-        msg += (
-            " — YouTube is blocking this server's IP. Set the YTDLP_COOKIES "
-            "(or YTDLP_PROXY) environment variable; see README."
-        )
+        if os.environ.get("YTDLP_COOKIES"):
+            msg = ("YouTube rejected this server's cookies (they have probably expired). "
+                   "Export fresh cookies into YTDLP_COOKIES and redeploy.")
+        else:
+            msg = ("YouTube is blocking this server with a bot check. "
+                   "Add YouTube cookies in the YTDLP_COOKIES environment variable and redeploy (see README).")
     elif "10054" in msg or "forcibly closed" in msg.lower():
         msg = "Connection reset by YouTube. Please wait a moment and try again."
     return msg
@@ -255,6 +261,8 @@ def create_app():
             "yt_dlp_version": app.config["YTDLP_VERSION"],
             "deno":           bool(_find_deno()),
             "ffmpeg":         bool(_find_ffmpeg()),
+            "cookies":        bool(os.environ.get("YTDLP_COOKIES")),
+            "proxy":          bool(os.environ.get("YTDLP_PROXY")),
         })
 
     # ── Fetch video metadata ──────────────────────────────────────
